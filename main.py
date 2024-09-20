@@ -18,8 +18,10 @@ def main():
     # makes the colour breathe
     breathing = False
 
+    rainbow = True
 
-    grain_size = 4
+
+    grain_size = 8
     screen_width = 1000
     screen_height = 1000
 
@@ -43,10 +45,10 @@ def main():
                 if not value < 100:
                     breathing_rising = not breathing_rising
 
-            elif not breathing_rising:
+            else:
                 value -= 1
 
-                if not value > 40:
+                if value < 40:
                     breathing_rising = not breathing_rising
 
         color = pygame.Color(0, 0, 0, 0)
@@ -110,6 +112,9 @@ def main():
         for row in range(0, grain_amount_height):
             for column in range(0, grain_amount_width):
                 if grid[row][column] >= 1:
+                    grid[row][column] = (grid[row][column] + (rainbow*1)) % 360
+                    if grid[row][column] < 1:
+                        grid[row][column] = 1
                     color.hsva = (grid[row][column], saturation, value, 100)
                     pygame.draw.rect(screen, color, (column*grain_size, row*grain_size, grain_size, grain_size))
         
