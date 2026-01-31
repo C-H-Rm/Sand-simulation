@@ -1,138 +1,157 @@
-import pygame
+from __future__ import annotations
+
 import numpy as np
+import pygame
 
-clock = pygame.time.Clock()
+from sand_simulation import apply_rainbow, erase_sand, place_sand, step_simulation
+
+FPS = 120
+SCREEN_WIDTH = 1000
+SCREEN_HEIGHT = 1000
+SCREEN_SIZE = (SCREEN_WIDTH, SCREEN_HEIGHT)
+
+GRAIN_SIZE = 8
+PLACEMENT_RADIUS = 2
+
+HUE_SPEED = 0.2
+SATURATION = 20
+VALUE_START = 75
+
+BREATHING_ENABLED = False
+BREATHING_MIN = 40
+BREATHING_MAX = 100
+
+RAINBOW_ENABLED = True
+BACKGROUND_COLOR = (0, 0, 0)
 
 
+def update_breathing(
+    value: int,
+    rising: bool,
+    min_value: int,
+    max_value: int,
+) -> tuple[int, bool]:
+    if rising:
+        value += 1
+        if value >= max_value:
+            rising = False
+    else:
+        value -= 1
+        if value < min_value:
+            rising = True
+    return value, rising
 
-def main():
-    fps = 120
 
-    # changes color in hsv format
-    saturation = 20
-    value = 75
-
-    # speed at which the hue moves
-    hue_speed = 0.2 
-
-    # makes the colour breathe
-    breathing = False
-
-    rainbow = True
+def handle_quit_events() -> bool:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            return False
+    return True
 
 
-    grain_size = 8
-    screen_width = 1000
-    screen_height = 1000
+def handle_mouse_input(
+    hue_grid: np.ndarray,
+    hue: float,
+    hue_speed: float,
+    grain_size: int,
+    placement_radius: int,
+    screen_width: int,
+    screen_height: int,
+) -> float:
+    mouse_buttons = pygame.mouse.get_pressed()
+    if not (mouse_buttons[0] or mouse_buttons[2]):
+        return hue
 
-    placement_size = 2
-    
+    x, y = pygame.mouse.get_pos()
+    if not (0 <= x < screen_width and 0 <= y < screen_height):
+        return hue
 
+    grid_x = x // grain_size
+    grid_y = y // grain_size
+
+    if mouse_buttons[0]:
+        hue = (hue + hue_speed) % 360
+        place_sand(hue_grid, grid_x, grid_y, hue, placement_radius)
+
+    if mouse_buttons[2]:
+        erase_sand(hue_grid, grid_x, grid_y)
+
+    return hue
+
+
+def draw_grid(
+    screen: pygame.Surface,
+    hue_grid: np.ndarray,
+    grain_size: int,
+    color: pygame.Color,
+    saturation: int,
+    value: int,
+) -> None:
+    grid_height, grid_width = hue_grid.shape
+    for row in range(grid_height):
+        row_values = hue_grid[row]
+        y_pos = row * grain_size
+        for col in range(grid_width):
+            hue_value = row_values[col]
+            if hue_value >= 1:
+                color.hsva = (hue_value, saturation, value, 100)
+                pygame.draw.rect(
+                    screen,
+                    color,
+                    (col * grain_size, y_pos, grain_size, grain_size),
+                )
+
+
+def main() -> None:
+    pygame.init()
+    clock = pygame.time.Clock()
+    screen = pygame.display.set_mode(SCREEN_SIZE)
+    pygame.display.set_caption("Sand simulation")
+
+    grid_width = SCREEN_WIDTH // GRAIN_SIZE
+    grid_height = SCREEN_HEIGHT // GRAIN_SIZE
+    hue_grid = np.zeros((grid_height, grid_width), dtype=np.float32)
+
+    hue = 1.0
+    brightness = VALUE_START
+    breathing_rising = True
+    sand_color = pygame.Color(0, 0, 0, 0)
 
     running = True
-    hue = 1
-    breathing_rising = True
-    grain_amount_width = screen_width // grain_size
-    grain_amount_height = screen_height // grain_size
-    screen = pygame.display.set_mode((screen_width, screen_height))
-    pygame.display.set_caption("Sand simulation")
-    grid = np.zeros((grain_amount_height, grain_amount_width), dtype=np.float32)
     while running:
-        if breathing:
-            if breathing_rising:
-                value += 1
+        running = handle_quit_events()
 
-                if not value < 100:
-                    breathing_rising = not breathing_rising
+        if BREATHING_ENABLED:
+            brightness, breathing_rising = update_breathing(
+                brightness,
+                breathing_rising,
+                BREATHING_MIN,
+                BREATHING_MAX,
+            )
 
-            else:
-                value -= 1
+        hue = handle_mouse_input(
+            hue_grid,
+            hue,
+            HUE_SPEED,
+            GRAIN_SIZE,
+            PLACEMENT_RADIUS,
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+        )
 
-                if value < 40:
-                    breathing_rising = not breathing_rising
+        hue_grid = step_simulation(hue_grid)
 
-        color = pygame.Color(0, 0, 0, 0)
-        screen.fill(pygame.Color(0,0,0))
-        for event in pygame.event.get(pygame.QUIT):
-            if event.type == pygame.QUIT:
-                running = False
-            
-        if pygame.mouse.get_pressed()[0]:
-            x, y = pygame.mouse.get_pos()
-            hue = (hue + hue_speed) % 360
+        if RAINBOW_ENABLED:
+            apply_rainbow(hue_grid)
 
-            if placement_size == 0:
-                if grid[y // grain_size, x // grain_size] == 0:
-                    grid[y // grain_size, x // grain_size] = hue
+        screen.fill(BACKGROUND_COLOR)
+        draw_grid(screen, hue_grid, GRAIN_SIZE, sand_color, SATURATION, brightness)
 
-            elif -1 < x < screen_width and -1 < y < screen_height:
-                y_index = y // grain_size
-                x_index = x // grain_size
-                y_start = max(0, y_index - placement_size)
-                y_end = min(grain_amount_height, y_index + placement_size)
-                x_start = max(0, x_index - placement_size)
-                x_end = min(grain_amount_width, x_index + placement_size)
-                placement_area = grid[y_start:y_end, x_start:x_end]
-                placement_area[placement_area == 0] = hue
-        
-        if pygame.mouse.get_pressed()[2]:
-            x, y = pygame.mouse.get_pos()
-
-            if -1 < x < screen_width and -1 < y < screen_height:
-                grid[y // grain_size, x // grain_size] = 0
-
-        occupied = grid > 0
-        below_empty = np.zeros_like(occupied, dtype=bool)
-        below_empty[:-1] = grid[1:] == 0
-        can_fall = occupied & below_empty
-        newgrid = np.zeros_like(grid)
-
-        fall_rows, fall_cols = np.where(can_fall[:-1])
-        newgrid[fall_rows + 1, fall_cols] = grid[fall_rows, fall_cols]
-
-        remaining = occupied.copy()
-        remaining[:-1] &= ~can_fall[:-1]
-
-        down_right_empty = np.zeros_like(occupied, dtype=bool)
-        down_left_empty = np.zeros_like(occupied, dtype=bool)
-        down_right_empty[:-1, :-1] = grid[1:, 1:] == 0
-        down_left_empty[:-1, 1:] = grid[1:, :-1] == 0
-        direction_choice = np.random.randint(0, 2, size=grid.shape, dtype=np.int8)
-
-        right_sources = remaining.copy()
-        right_sources[:-1, :-1] &= down_right_empty[:-1, :-1] & (direction_choice[:-1, :-1] == 0)
-        right_rows, right_cols = np.where(right_sources[:-1, :-1])
-        right_targets_empty = newgrid[right_rows + 1, right_cols + 1] == 0
-        right_rows = right_rows[right_targets_empty]
-        right_cols = right_cols[right_targets_empty]
-        newgrid[right_rows + 1, right_cols + 1] = grid[right_rows, right_cols]
-
-        left_sources = remaining.copy()
-        left_sources[:-1, 1:] &= down_left_empty[:-1, 1:] & (direction_choice[:-1, 1:] == 1)
-        left_rows, left_cols = np.where(left_sources[:-1, 1:])
-        left_targets_empty = newgrid[left_rows + 1, left_cols] == 0
-        left_rows = left_rows[left_targets_empty]
-        left_cols = left_cols[left_targets_empty]
-        newgrid[left_rows + 1, left_cols] = grid[left_rows, left_cols + 1]
-
-        moved_sources = np.zeros_like(occupied, dtype=bool)
-        moved_sources[fall_rows, fall_cols] = True
-        moved_sources[right_rows, right_cols] = True
-        moved_sources[left_rows, left_cols + 1] = True
-        stationary = occupied & ~moved_sources
-        newgrid[stationary] = grid[stationary]
-
-        grid = newgrid
-        if rainbow:
-            grid[grid > 0] = (grid[grid > 0] % 359) + 1
-
-        for row in range(0, grain_amount_height):
-            for column in range(0, grain_amount_width):
-                if grid[row][column] >= 1:
-                    color.hsva = (grid[row][column], saturation, value, 100)
-                    pygame.draw.rect(screen, color, (column*grain_size, row*grain_size, grain_size, grain_size))
-        
         pygame.display.flip()
-        clock.tick(fps)
+        clock.tick(FPS)
 
-main()
+    pygame.quit()
+
+
+if __name__ == "__main__":
+    main()
