@@ -39,6 +39,21 @@ def apply_rainbow(hue_grid: np.ndarray) -> None:
     hue_grid[mask] = (hue_grid[mask] % 359) + 1
 
 
+def compute_active_bounds(
+    hue_grid: np.ndarray,
+    padding: int = 1,
+) -> tuple[slice, slice] | None:
+    rows, cols = np.nonzero(hue_grid)
+    if rows.size == 0:
+        return None
+
+    row_start = max(int(rows.min()) - padding, 0)
+    row_end = min(int(rows.max()) + padding + 1, hue_grid.shape[0])
+    col_start = max(int(cols.min()) - padding, 0)
+    col_end = min(int(cols.max()) + padding + 1, hue_grid.shape[1])
+    return slice(row_start, row_end), slice(col_start, col_end)
+
+
 @dataclass
 class SimulationBuffers:
     next_grid: np.ndarray
@@ -74,6 +89,7 @@ def step_simulation(
     hue_grid: np.ndarray,
     buffers: SimulationBuffers | None = None,
     rng=np.random,
+    active_slices: tuple[slice, slice] | None = None,
 ) -> np.ndarray:
     """Advance the simulation by one tick and return the next grid."""
     if buffers is None:
@@ -125,67 +141,71 @@ def step_simulation(
 
         return next_grid
 
-    filled = buffers.filled
-    np.greater(hue_grid, 0, out=filled)
+    row_slice, col_slice = active_slices or (slice(None), slice(None))
+    grid_view = hue_grid[row_slice, col_slice]
 
-    below_empty = buffers.below_empty
+    filled = buffers.filled[row_slice, col_slice]
+    np.greater(grid_view, 0, out=filled)
+
+    below_empty = buffers.below_empty[row_slice, col_slice]
     below_empty.fill(False)
-    below_empty[:-1] = hue_grid[1:] == 0
+    below_empty[:-1] = grid_view[1:] == 0
 
-    can_fall = buffers.can_fall
+    can_fall = buffers.can_fall[row_slice, col_slice]
     np.logical_and(filled, below_empty, out=can_fall)
 
     next_grid = buffers.next_grid
-    next_grid.fill(0)
+    next_region = next_grid[row_slice, col_slice]
+    next_region.fill(0)
 
     fall_rows, fall_cols = np.where(can_fall[:-1])
-    next_grid[fall_rows + 1, fall_cols] = hue_grid[fall_rows, fall_cols]
+    next_region[fall_rows + 1, fall_cols] = grid_view[fall_rows, fall_cols]
 
-    remaining = buffers.remaining
+    remaining = buffers.remaining[row_slice, col_slice]
     np.copyto(remaining, filled)
     remaining[:-1] &= ~can_fall[:-1]
 
-    down_right_empty = buffers.down_right_empty
+    down_right_empty = buffers.down_right_empty[row_slice, col_slice]
     down_right_empty.fill(False)
-    down_right_empty[:-1, :-1] = hue_grid[1:, 1:] == 0
+    down_right_empty[:-1, :-1] = grid_view[1:, 1:] == 0
 
-    down_left_empty = buffers.down_left_empty
+    down_left_empty = buffers.down_left_empty[row_slice, col_slice]
     down_left_empty.fill(False)
-    down_left_empty[:-1, 1:] = hue_grid[1:, :-1] == 0
+    down_left_empty[:-1, 1:] = grid_view[1:, :-1] == 0
 
-    direction_choice = rng.randint(0, 2, size=hue_grid.shape, dtype=np.int8)
+    direction_choice = rng.randint(0, 2, size=grid_view.shape, dtype=np.int8)
 
-    right_sources = buffers.right_sources
+    right_sources = buffers.right_sources[row_slice, col_slice]
     np.copyto(right_sources, remaining)
     right_sources[:-1, :-1] &= down_right_empty[:-1, :-1] & (
         direction_choice[:-1, :-1] == 0
     )
     right_rows, right_cols = np.where(right_sources[:-1, :-1])
-    right_targets_empty = next_grid[right_rows + 1, right_cols + 1] == 0
+    right_targets_empty = next_region[right_rows + 1, right_cols + 1] == 0
     right_rows = right_rows[right_targets_empty]
     right_cols = right_cols[right_targets_empty]
-    next_grid[right_rows + 1, right_cols + 1] = hue_grid[right_rows, right_cols]
+    next_region[right_rows + 1, right_cols + 1] = grid_view[right_rows, right_cols]
 
-    left_sources = buffers.left_sources
+    left_sources = buffers.left_sources[row_slice, col_slice]
     np.copyto(left_sources, remaining)
     left_sources[:-1, 1:] &= down_left_empty[:-1, 1:] & (
         direction_choice[:-1, 1:] == 1
     )
     left_rows, left_cols = np.where(left_sources[:-1, 1:])
-    left_targets_empty = next_grid[left_rows + 1, left_cols] == 0
+    left_targets_empty = next_region[left_rows + 1, left_cols] == 0
     left_rows = left_rows[left_targets_empty]
     left_cols = left_cols[left_targets_empty]
-    next_grid[left_rows + 1, left_cols] = hue_grid[left_rows, left_cols + 1]
+    next_region[left_rows + 1, left_cols] = grid_view[left_rows, left_cols + 1]
 
-    moved_sources = buffers.moved_sources
+    moved_sources = buffers.moved_sources[row_slice, col_slice]
     moved_sources.fill(False)
     moved_sources[fall_rows, fall_cols] = True
     moved_sources[right_rows, right_cols] = True
     moved_sources[left_rows, left_cols + 1] = True
 
-    stationary = buffers.stationary
+    stationary = buffers.stationary[row_slice, col_slice]
     np.logical_not(moved_sources, out=stationary)
     np.logical_and(filled, stationary, out=stationary)
-    next_grid[stationary] = hue_grid[stationary]
+    next_region[stationary] = grid_view[stationary]
 
     return next_grid

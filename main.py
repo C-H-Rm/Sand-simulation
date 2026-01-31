@@ -6,12 +6,13 @@ import pygame
 from sand_simulation import (
     SimulationBuffers,
     apply_rainbow,
+    compute_active_bounds,
     erase_sand,
     place_sand,
     step_simulation,
 )
 
-FPS = 120
+FPS = 2000
 SCREEN_WIDTH = 1000
 SCREEN_HEIGHT = 1000
 SCREEN_SIZE = (SCREEN_WIDTH, SCREEN_HEIGHT)
@@ -33,6 +34,24 @@ FPS_COLOR = (240, 240, 240)
 FPS_FONT_SIZE = 18
 FPS_UPDATE_MS = 200
 FPS_PADDING = 8
+DIRTY_RENDERING = True
+DIRTY_FULL_REDRAW_THRESHOLD = 0.4
+
+
+def merge_bounds(
+    bounds: tuple[slice, slice] | None,
+    new_bounds: tuple[slice, slice] | None,
+) -> tuple[slice, slice] | None:
+    if bounds is None:
+        return new_bounds
+    if new_bounds is None:
+        return bounds
+    row_bounds, col_bounds = bounds
+    new_rows, new_cols = new_bounds
+    return (
+        slice(min(row_bounds.start, new_rows.start), max(row_bounds.stop, new_rows.stop)),
+        slice(min(col_bounds.start, new_cols.start), max(col_bounds.stop, new_cols.stop)),
+    )
 
 
 def update_breathing(
@@ -52,11 +71,15 @@ def update_breathing(
     return value, rising
 
 
-def handle_quit_events() -> bool:
+def handle_events(rainbow_enabled: bool) -> tuple[bool, bool]:
+    running = True
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
-            return False
-    return True
+            running = False
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_r:
+                rainbow_enabled = not rainbow_enabled
+    return running, rainbow_enabled
 
 
 def handle_mouse_input(
@@ -67,26 +90,46 @@ def handle_mouse_input(
     placement_radius: int,
     screen_width: int,
     screen_height: int,
-) -> float:
+) -> tuple[float, tuple[slice, slice] | None]:
     mouse_buttons = pygame.mouse.get_pressed()
     if not (mouse_buttons[0] or mouse_buttons[2]):
-        return hue
+        return hue, None
 
     x, y = pygame.mouse.get_pos()
     if not (0 <= x < screen_width and 0 <= y < screen_height):
-        return hue
+        return hue, None
 
     grid_x = x // grain_size
     grid_y = y // grain_size
+    max_rows, max_cols = hue_grid.shape
+    dirty_bounds: tuple[slice, slice] | None = None
 
     if mouse_buttons[0]:
         hue = (hue + hue_speed) % 360
         place_sand(hue_grid, grid_x, grid_y, hue, placement_radius)
+        if placement_radius == 0:
+            dirty_bounds = merge_bounds(
+                dirty_bounds,
+                (slice(grid_y, grid_y + 1), slice(grid_x, grid_x + 1)),
+            )
+        else:
+            y_start = max(0, grid_y - placement_radius)
+            y_end = min(max_rows, grid_y + placement_radius)
+            x_start = max(0, grid_x - placement_radius)
+            x_end = min(max_cols, grid_x + placement_radius)
+            dirty_bounds = merge_bounds(
+                dirty_bounds,
+                (slice(y_start, y_end), slice(x_start, x_end)),
+            )
 
     if mouse_buttons[2]:
         erase_sand(hue_grid, grid_x, grid_y)
+        dirty_bounds = merge_bounds(
+            dirty_bounds,
+            (slice(grid_y, grid_y + 1), slice(grid_x, grid_x + 1)),
+        )
 
-    return hue
+    return hue, dirty_bounds
 
 
 def draw_grid(
@@ -103,7 +146,7 @@ def draw_grid(
         y_pos = row * grain_size
         for col in range(grid_width):
             hue_value = row_values[col]
-            if hue_value >= 1:
+            if hue_value > 0:
                 color.hsva = (hue_value, saturation, value, 100)
                 pygame.draw.rect(
                     screen,
@@ -112,12 +155,53 @@ def draw_grid(
                 )
 
 
+def draw_changed_cells(
+    screen: pygame.Surface,
+    hue_grid: np.ndarray,
+    grain_size: int,
+    color: pygame.Color,
+    saturation: int,
+    value: int,
+    rows: np.ndarray,
+    cols: np.ndarray,
+) -> list[pygame.Rect]:
+    rects: list[pygame.Rect] = []
+    for row, col in zip(rows, cols):
+        hue_value = hue_grid[row, col]
+        rect = pygame.Rect(
+            col * grain_size,
+            row * grain_size,
+            grain_size,
+            grain_size,
+        )
+        if hue_value > 0:
+            color.hsva = (hue_value, saturation, value, 100)
+            pygame.draw.rect(screen, color, rect)
+        else:
+            pygame.draw.rect(screen, BACKGROUND_COLOR, rect)
+        rects.append(rect)
+    return rects
+
+
 def update_fps_surface(
     font: pygame.font.Font,
     fps_value: float,
 ) -> pygame.Surface:
     fps_text = f"{fps_value:5.1f} FPS"
     return font.render(fps_text, True, FPS_COLOR)
+
+
+def rect_to_grid_bounds(
+    rect: pygame.Rect,
+    grain_size: int,
+    grid_width: int,
+    grid_height: int,
+) -> tuple[slice, slice]:
+    col_start = max(0, rect.left // grain_size)
+    col_end = min(grid_width, (rect.right + grain_size - 1) // grain_size)
+    row_start = max(0, rect.top // grain_size)
+    row_end = min(grid_height, (rect.bottom + grain_size - 1) // grain_size)
+    return slice(row_start, row_end), slice(col_start, col_end)
 
 
 def main() -> None:
@@ -138,11 +222,22 @@ def main() -> None:
     sand_color = pygame.Color(0, 0, 0, 0)
     fps_surface = update_fps_surface(fps_font, 0.0)
     fps_rect = fps_surface.get_rect()
+    fps_rect.top = FPS_PADDING
+    fps_rect.right = SCREEN_WIDTH - FPS_PADDING
+    fps_grid_slice = rect_to_grid_bounds(
+        fps_rect,
+        GRAIN_SIZE,
+        grid_width,
+        grid_height,
+    )
     last_fps_update = 0
+    first_frame = True
+    last_active_bounds: tuple[slice, slice] | None = None
 
     running = True
+    rainbow_enabled = RAINBOW_ENABLED
     while running:
-        running = handle_quit_events()
+        running, rainbow_enabled = handle_events(rainbow_enabled)
 
         if BREATHING_ENABLED:
             brightness, breathing_rising = update_breathing(
@@ -152,7 +247,7 @@ def main() -> None:
                 BREATHING_MAX,
             )
 
-        hue = handle_mouse_input(
+        hue, input_dirty_bounds = handle_mouse_input(
             hue_grid,
             hue,
             HUE_SPEED,
@@ -162,14 +257,23 @@ def main() -> None:
             SCREEN_HEIGHT,
         )
 
-        next_grid = step_simulation(hue_grid, buffers=buffers)
+        active_slices = compute_active_bounds(hue_grid, padding=1)
+        clear_slices = merge_bounds(last_active_bounds, active_slices)
+        if clear_slices is not None:
+            buffers.next_grid[clear_slices].fill(0)
+        if active_slices is None:
+            next_grid = buffers.next_grid
+        else:
+            next_grid = step_simulation(
+                hue_grid,
+                buffers=buffers,
+                active_slices=active_slices,
+            )
         hue_grid, buffers.next_grid = next_grid, hue_grid
+        last_active_bounds = active_slices
 
-        if RAINBOW_ENABLED:
+        if rainbow_enabled:
             apply_rainbow(hue_grid)
-
-        screen.fill(BACKGROUND_COLOR)
-        draw_grid(screen, hue_grid, GRAIN_SIZE, sand_color, SATURATION, brightness)
 
         now_ms = pygame.time.get_ticks()
         if now_ms - last_fps_update >= FPS_UPDATE_MS:
@@ -177,10 +281,61 @@ def main() -> None:
             fps_rect = fps_surface.get_rect()
             fps_rect.top = FPS_PADDING
             fps_rect.right = SCREEN_WIDTH - FPS_PADDING
+            fps_grid_slice = rect_to_grid_bounds(
+                fps_rect,
+                GRAIN_SIZE,
+                grid_width,
+                grid_height,
+            )
             last_fps_update = now_ms
-        screen.blit(fps_surface, fps_rect)
 
-        pygame.display.flip()
+        if not DIRTY_RENDERING or first_frame:
+            screen.fill(BACKGROUND_COLOR)
+            draw_grid(screen, hue_grid, GRAIN_SIZE, sand_color, SATURATION, brightness)
+            screen.blit(fps_surface, fps_rect)
+            pygame.display.flip()
+            first_frame = False
+            clock.tick(FPS)
+            continue
+
+        previous_grid = buffers.next_grid
+        changed_mask = hue_grid != previous_grid
+        row_slice, col_slice = fps_grid_slice
+        changed_mask[row_slice, col_slice] = True
+        if input_dirty_bounds is not None:
+            row_slice, col_slice = input_dirty_bounds
+            changed_mask[row_slice, col_slice] = True
+
+        changed_count = int(np.count_nonzero(changed_mask))
+        if changed_count == 0:
+            screen.blit(fps_surface, fps_rect)
+            pygame.display.update(fps_rect)
+            clock.tick(FPS)
+            continue
+
+        if changed_count > hue_grid.size * DIRTY_FULL_REDRAW_THRESHOLD:
+            screen.fill(BACKGROUND_COLOR)
+            draw_grid(screen, hue_grid, GRAIN_SIZE, sand_color, SATURATION, brightness)
+            screen.blit(fps_surface, fps_rect)
+            pygame.display.flip()
+            clock.tick(FPS)
+            continue
+
+        changed_rows, changed_cols = np.where(changed_mask)
+        dirty_rects = draw_changed_cells(
+            screen,
+            hue_grid,
+            GRAIN_SIZE,
+            sand_color,
+            SATURATION,
+            brightness,
+            changed_rows,
+            changed_cols,
+        )
+        screen.blit(fps_surface, fps_rect)
+        dirty_rects.append(fps_rect)
+        pygame.display.update(dirty_rects)
+
         clock.tick(FPS)
 
     pygame.quit()
