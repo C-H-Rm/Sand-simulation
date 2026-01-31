@@ -3,7 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pygame
 
-from sand_simulation import apply_rainbow, erase_sand, place_sand, step_simulation
+from sand_simulation import (
+    SimulationBuffers,
+    apply_rainbow,
+    erase_sand,
+    place_sand,
+    step_simulation,
+)
 
 FPS = 120
 SCREEN_WIDTH = 1000
@@ -21,8 +27,12 @@ BREATHING_ENABLED = False
 BREATHING_MIN = 40
 BREATHING_MAX = 100
 
-RAINBOW_ENABLED = True
+RAINBOW_ENABLED = False
 BACKGROUND_COLOR = (0, 0, 0)
+FPS_COLOR = (240, 240, 240)
+FPS_FONT_SIZE = 18
+FPS_UPDATE_MS = 200
+FPS_PADDING = 8
 
 
 def update_breathing(
@@ -102,20 +112,33 @@ def draw_grid(
                 )
 
 
+def update_fps_surface(
+    font: pygame.font.Font,
+    fps_value: float,
+) -> pygame.Surface:
+    fps_text = f"{fps_value:5.1f} FPS"
+    return font.render(fps_text, True, FPS_COLOR)
+
+
 def main() -> None:
     pygame.init()
     clock = pygame.time.Clock()
     screen = pygame.display.set_mode(SCREEN_SIZE)
     pygame.display.set_caption("Sand simulation")
+    fps_font = pygame.font.Font(None, FPS_FONT_SIZE)
 
     grid_width = SCREEN_WIDTH // GRAIN_SIZE
     grid_height = SCREEN_HEIGHT // GRAIN_SIZE
     hue_grid = np.zeros((grid_height, grid_width), dtype=np.float32)
+    buffers = SimulationBuffers.create(hue_grid.shape, hue_grid.dtype)
 
     hue = 1.0
     brightness = VALUE_START
     breathing_rising = True
     sand_color = pygame.Color(0, 0, 0, 0)
+    fps_surface = update_fps_surface(fps_font, 0.0)
+    fps_rect = fps_surface.get_rect()
+    last_fps_update = 0
 
     running = True
     while running:
@@ -139,13 +162,23 @@ def main() -> None:
             SCREEN_HEIGHT,
         )
 
-        hue_grid = step_simulation(hue_grid)
+        next_grid = step_simulation(hue_grid, buffers=buffers)
+        hue_grid, buffers.next_grid = next_grid, hue_grid
 
         if RAINBOW_ENABLED:
             apply_rainbow(hue_grid)
 
         screen.fill(BACKGROUND_COLOR)
         draw_grid(screen, hue_grid, GRAIN_SIZE, sand_color, SATURATION, brightness)
+
+        now_ms = pygame.time.get_ticks()
+        if now_ms - last_fps_update >= FPS_UPDATE_MS:
+            fps_surface = update_fps_surface(fps_font, clock.get_fps())
+            fps_rect = fps_surface.get_rect()
+            fps_rect.top = FPS_PADDING
+            fps_rect.right = SCREEN_WIDTH - FPS_PADDING
+            last_fps_update = now_ms
+        screen.blit(fps_surface, fps_rect)
 
         pygame.display.flip()
         clock.tick(FPS)
