@@ -12,12 +12,13 @@ from sand_simulation import (
     step_simulation,
 )
 
-FPS = 2000
+FPS = 120
 SCREEN_WIDTH = 1000
 SCREEN_HEIGHT = 1000
 SCREEN_SIZE = (SCREEN_WIDTH, SCREEN_HEIGHT)
+FULLSCREEN_ENABLED = True
 
-GRAIN_SIZE = 8
+GRAIN_SIZE = 10
 PLACEMENT_RADIUS = 2
 
 HUE_SPEED = 0.2
@@ -204,15 +205,74 @@ def rect_to_grid_bounds(
     return slice(row_start, row_end), slice(col_start, col_end)
 
 
+def setup_screen(
+    fullscreen_enabled: bool,
+    screen_size: tuple[int, int],
+) -> tuple[pygame.Surface, int, int]:
+    if fullscreen_enabled:
+        display_info = pygame.display.Info()
+        screen_width = display_info.current_w
+        screen_height = display_info.current_h
+        screen = pygame.display.set_mode(
+            (screen_width, screen_height),
+            pygame.FULLSCREEN,
+        )
+    else:
+        screen_width, screen_height = screen_size
+        screen = pygame.display.set_mode((screen_width, screen_height))
+    return screen, screen_width, screen_height
+
+
+def update_fps_display(
+    font: pygame.font.Font,
+    fps_value: float,
+    screen_width: int,
+    padding: int,
+    grain_size: int,
+    grid_width: int,
+    grid_height: int,
+) -> tuple[pygame.Surface, pygame.Rect, tuple[slice, slice]]:
+    fps_surface = update_fps_surface(font, fps_value)
+    fps_rect = fps_surface.get_rect()
+    fps_rect.top = padding
+    fps_rect.right = screen_width - padding
+    fps_grid_slice = rect_to_grid_bounds(
+        fps_rect,
+        grain_size,
+        grid_width,
+        grid_height,
+    )
+    return fps_surface, fps_rect, fps_grid_slice
+
+
+def render_full_frame(
+    screen: pygame.Surface,
+    hue_grid: np.ndarray,
+    grain_size: int,
+    color: pygame.Color,
+    saturation: int,
+    value: int,
+    fps_surface: pygame.Surface,
+    fps_rect: pygame.Rect,
+) -> None:
+    screen.fill(BACKGROUND_COLOR)
+    draw_grid(screen, hue_grid, grain_size, color, saturation, value)
+    screen.blit(fps_surface, fps_rect)
+    pygame.display.flip()
+
+
 def main() -> None:
     pygame.init()
     clock = pygame.time.Clock()
-    screen = pygame.display.set_mode(SCREEN_SIZE)
+    screen, screen_width, screen_height = setup_screen(
+        FULLSCREEN_ENABLED,
+        SCREEN_SIZE,
+    )
     pygame.display.set_caption("Sand simulation")
     fps_font = pygame.font.Font(None, FPS_FONT_SIZE)
 
-    grid_width = SCREEN_WIDTH // GRAIN_SIZE
-    grid_height = SCREEN_HEIGHT // GRAIN_SIZE
+    grid_width = screen_width // GRAIN_SIZE
+    grid_height = screen_height // GRAIN_SIZE
     hue_grid = np.zeros((grid_height, grid_width), dtype=np.float32)
     buffers = SimulationBuffers.create(hue_grid.shape, hue_grid.dtype)
 
@@ -220,12 +280,11 @@ def main() -> None:
     brightness = VALUE_START
     breathing_rising = True
     sand_color = pygame.Color(0, 0, 0, 0)
-    fps_surface = update_fps_surface(fps_font, 0.0)
-    fps_rect = fps_surface.get_rect()
-    fps_rect.top = FPS_PADDING
-    fps_rect.right = SCREEN_WIDTH - FPS_PADDING
-    fps_grid_slice = rect_to_grid_bounds(
-        fps_rect,
+    fps_surface, fps_rect, fps_grid_slice = update_fps_display(
+        fps_font,
+        0.0,
+        screen_width,
+        FPS_PADDING,
         GRAIN_SIZE,
         grid_width,
         grid_height,
@@ -253,8 +312,8 @@ def main() -> None:
             HUE_SPEED,
             GRAIN_SIZE,
             PLACEMENT_RADIUS,
-            SCREEN_WIDTH,
-            SCREEN_HEIGHT,
+            screen_width,
+            screen_height,
         )
 
         active_slices = compute_active_bounds(hue_grid, padding=1)
@@ -273,16 +332,15 @@ def main() -> None:
         last_active_bounds = active_slices
 
         if rainbow_enabled:
-            apply_rainbow(hue_grid)
+            apply_rainbow(hue_grid, active_slices)
 
         now_ms = pygame.time.get_ticks()
         if now_ms - last_fps_update >= FPS_UPDATE_MS:
-            fps_surface = update_fps_surface(fps_font, clock.get_fps())
-            fps_rect = fps_surface.get_rect()
-            fps_rect.top = FPS_PADDING
-            fps_rect.right = SCREEN_WIDTH - FPS_PADDING
-            fps_grid_slice = rect_to_grid_bounds(
-                fps_rect,
+            fps_surface, fps_rect, fps_grid_slice = update_fps_display(
+                fps_font,
+                clock.get_fps(),
+                screen_width,
+                FPS_PADDING,
                 GRAIN_SIZE,
                 grid_width,
                 grid_height,
@@ -290,16 +348,23 @@ def main() -> None:
             last_fps_update = now_ms
 
         if not DIRTY_RENDERING or first_frame:
-            screen.fill(BACKGROUND_COLOR)
-            draw_grid(screen, hue_grid, GRAIN_SIZE, sand_color, SATURATION, brightness)
-            screen.blit(fps_surface, fps_rect)
-            pygame.display.flip()
+            render_full_frame(
+                screen,
+                hue_grid,
+                GRAIN_SIZE,
+                sand_color,
+                SATURATION,
+                brightness,
+                fps_surface,
+                fps_rect,
+            )
             first_frame = False
             clock.tick(FPS)
             continue
 
         previous_grid = buffers.next_grid
-        changed_mask = hue_grid != previous_grid
+        changed_mask = buffers.changed_mask
+        np.not_equal(hue_grid, previous_grid, out=changed_mask)
         row_slice, col_slice = fps_grid_slice
         changed_mask[row_slice, col_slice] = True
         if input_dirty_bounds is not None:
@@ -314,10 +379,16 @@ def main() -> None:
             continue
 
         if changed_count > hue_grid.size * DIRTY_FULL_REDRAW_THRESHOLD:
-            screen.fill(BACKGROUND_COLOR)
-            draw_grid(screen, hue_grid, GRAIN_SIZE, sand_color, SATURATION, brightness)
-            screen.blit(fps_surface, fps_rect)
-            pygame.display.flip()
+            render_full_frame(
+                screen,
+                hue_grid,
+                GRAIN_SIZE,
+                sand_color,
+                SATURATION,
+                brightness,
+                fps_surface,
+                fps_rect,
+            )
             clock.tick(FPS)
             continue
 
